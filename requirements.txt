@@ -1,0 +1,12 @@
+langchain
+langgraph
+langchain-community
+langchain-google-genai
+python-dotenv
+langchain-huggingface
+faiss-cpu
+sentence-transformers
+pydantic
+tavily-python
+wikipedia
+streamlit
