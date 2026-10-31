@@ -8,27 +8,43 @@ from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.messages import BaseMessage, HumanMessage
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langgraph.graph import StateGraph, START
 from langgraph.graph import MessagesState, END
 from langgraph.types import Command
+from typing import Literal
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_core.tools import Tool
 from typing import Annotated
 from dotenv import load_dotenv
 load_dotenv()
-from langchain.chat_models import init_chat_model
+from langchain_sarvam import ChatSarvam
 
 os.environ["TAVILY_API_KEY"] = os.getenv("TAVILY_API_KEY")
-os.environ["GEMINI_API_KEY"] = os.getenv("GEMINI_API_KEY")
+os.environ["SARVAM_API_KEY"] = os.getenv("SARVAM_API_KEY")
 
-llm = init_chat_model("google_genai:gemini-3.7-flash")
+rate_limiter = InMemoryRateLimiter(requests_per_second=0.2)
+llm = ChatSarvam(
+    model="sarvam-105b",
+    rate_limiter=rate_limiter,
+    max_retries=2,
+)
+
+def text_of(msg: BaseMessage) -> str:
+    """Handle both str and list-of-blocks content."""
+    c = msg.content
+    if isinstance(c, str):
+        return c
+    return "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in c)
+
 
 ### generic function to create a retrieval tool
 def make_retriever_tool_from_text(file, name, desc):
     docs=TextLoader(file,encoding="utf-8").load()
     chunks = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50).split_documents(docs)
-    vs =FAISS.from_documents(chunks, HuggingFaceEmbeddings())
-    retriever = vs.as_retriever()
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vs =FAISS.from_documents(chunks, embeddings)
+    retriever = vs.as_retriever(search_kwargs={"k": 4})
     
     def tool_func(query:str)->str:
         print(f"Using tool: {name}")
@@ -61,53 +77,54 @@ def make_system_prompt(suffix: str) -> str:
     
 ### Reaearch agent and node
 
-research_agent=create_react_agent(
+research_agent=create_agent(
     llm,
     tools=[internal_tool_1,tavily_tool],
-    prompt=make_system_prompt("You can only do research. Use the tool that you are binded with, you can use both of them" \
+    system_prompt=make_system_prompt("You can only do research. Use the tool that you are binded with, you can use both of them" \
     " You are working with a content writer colleague.")
 )
 
 ## Reaearch node
-from typing import Literal
-def research_node(state:MessagesState)-> Command[Literal["blog_generator",END]]:
+def research_node(state:MessagesState)-> Command[Literal["blog_generator", "__end__"]]:
     result = research_agent.invoke(state)
-    goto = get_next_node(result["messages"][-1], "blog_generator")
+    last_msg = result["messages"][-1]
+    goto = get_next_node(last_msg, "blog_generator")
 
     # wrap in a human message, as not all providers allow
     # AI message at the last position of the input messages list
-    result["messages"][-1] = HumanMessage(
-        content=result["messages"][-1].content, name="researcher"
+    shared_message = HumanMessage(
+        content=last_msg.content, name="researcher"
     )
     return Command(
         update={
             # share internal message history of research agent with other agents
-            "messages": result["messages"],
+            "messages": [shared_message],
         },
         goto=goto,
     )
 
 ### Blog write agent
-blog_agent=create_react_agent(
+blog_agent=create_agent(
     llm,
     tools=[],
-    prompt=make_system_prompt(
+    system_prompt=make_system_prompt(
         "You can only write a detailed blog. You are working with a researcher colleague."
     )
 )
 
-def blog_node(state: MessagesState) -> Command[Literal["researcher", END]]:
+def blog_node(state: MessagesState) -> Command[Literal["researcher", "__end__"]]:
     result = blog_agent.invoke(state)
-    goto = get_next_node(result["messages"][-1], "researcher")
+    last_msg = result["messages"][-1]
+    goto = get_next_node(last_msg, "researcher")
     # wrap in a human message, as not all providers allow
     # AI message at the last position of the input messages list
-    result["messages"][-1] = HumanMessage(
-        content=result["messages"][-1].content, name="blog_generator"
+    shared_message = HumanMessage(
+        content=last_msg.content, name="blog_generator"
     )
     return Command(
         update={
             # share internal message history of chart agent with other agents
-            "messages": result["messages"],
+            "messages": [shared_message],
         },
         goto=goto,
     )
@@ -119,6 +136,11 @@ workflow.add_node("blog_generator", blog_node)
 workflow.add_edge(START, "researcher")
 graph = workflow.compile()
 
-response=graph.invoke({"messages":"Write a detailed blog on transformer variants in production deployments"})
-
-print(response["messages"][-1].content)
+if __name__ == "__main__":
+    response = graph.invoke(
+        {"messages": [HumanMessage(content="Write a detailed blog on transformer variants in production deployments")]},
+        config={"recursion_limit": 12},
+    )
+    final = text_of(response["messages"][-1]).replace("FINAL ANSWER", "", 1).strip()
+    print("\n--- FINAL BLOG ---\n")
+    print(final)

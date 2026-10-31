@@ -1,7 +1,7 @@
 langchain
 langgraph
 langchain-community
-langchain-google-genai
+langchain-sarvam
 python-dotenv
 langchain-huggingface
 faiss-cpu
