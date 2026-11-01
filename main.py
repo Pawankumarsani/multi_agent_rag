@@ -1,5 +1,5 @@
 import os
-from langchain_community.tools import TavilySearchResults
+from langchain_tavily import TavilySearch
 from langchain_core.tools import tool
 from langchain_community.tools.wikipedia.tool import WikipediaQueryRun
 from langchain_community.utilities import WikipediaAPIWrapper
@@ -31,11 +31,23 @@ llm = ChatSarvam(
 )
 
 def text_of(msg: BaseMessage) -> str:
-    """Handle both str and list-of-blocks content."""
-    c = msg.content
+    """Handle str content, None, and list-of-blocks content."""
+    c = getattr(msg, "content", "") or ""
     if isinstance(c, str):
         return c
-    return "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in c)
+    if isinstance(c, list):
+        parts = []
+        for block in c:
+            if isinstance(block, dict):
+                parts.append(block.get("text") or "")
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(c)
+
+
+def has_final_answer(msg: BaseMessage) -> bool:
+    return "FINAL ANSWER" in text_of(msg)
 
 
 ### generic function to create a retrieval tool
@@ -52,7 +64,8 @@ def make_retriever_tool_from_text(file, name, desc):
         return "\n\n".join(doc.page_content for doc in results)
     return Tool(name=name,description=desc,func=tool_func)
 
-tavily_tool=TavilySearchResults(max_results=5)
+
+tavily_tool=TavilySearch(max_results=5)
 
 internal_tool_1=make_retriever_tool_from_text("internal_docs.txt",
                                               "InternalResearchNotes",
@@ -136,7 +149,17 @@ workflow.add_node("blog_generator", blog_node)
 workflow.add_edge(START, "researcher")
 graph = workflow.compile()
 
+try:
+    png_bytes = graph.get_graph(xray=True).draw_mermaid_png()
+    with open("graph.png", "wb") as f:
+        f.write(png_bytes)
+    print("Saved graph visualization to graph.png")
+except Exception as e:
+    print(f"Could not render graph image ({e}); printing mermaid source instead:\n")
+    print(graph.get_graph(xray=True).draw_mermaid())
+
 if __name__ == "__main__":
+    
     response = graph.invoke(
         {"messages": [HumanMessage(content="Write a detailed blog on transformer variants in production deployments")]},
         config={"recursion_limit": 12},
@@ -144,3 +167,4 @@ if __name__ == "__main__":
     final = text_of(response["messages"][-1]).replace("FINAL ANSWER", "", 1).strip()
     print("\n--- FINAL BLOG ---\n")
     print(final)
+    

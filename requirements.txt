@@ -7,6 +7,7 @@ langchain-huggingface
 faiss-cpu
 sentence-transformers
 pydantic
+langchain-tavily
 tavily-python
 wikipedia
 streamlit
